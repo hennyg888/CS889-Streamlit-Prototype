@@ -1,6 +1,83 @@
 import json
+import os
 import streamlit as st
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# --- Cached model & embeddings loaders ---
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+
+@st.cache_data
+def load_field_embeddings() -> Dict[str, Optional[np.ndarray]]:
+    files = {
+        "title": "titles_embeddings.npy",
+        "journal": "journals_embeddings.npy",
+        "abstract": "abstracts_embeddings.npy",
+        "keywords": "keywords_embeddings.npy",
+    }
+    embs: Dict[str, Optional[np.ndarray]] = {}
+    for k, path in files.items():
+        if os.path.exists(path):
+            embs[k] = np.load(path)
+        else:
+            embs[k] = None
+    return embs
+
+
+def search_semantic(references: List[Dict[str, Any]], query: str, fields: List[str], year_min: Optional[int], year_max: Optional[int], top_k: int = 50) -> List[Dict[str, Any]]:
+    """Perform semantic search across selected fields using precomputed embeddings.
+    Returns top_k references sorted by aggregated similarity score."""
+    if not query:
+        return []
+
+    # Load embeddings and model
+    embs = load_field_embeddings()
+    model = load_model()
+
+    # Check availability
+    available = [f for f in fields if embs.get(f) is not None]
+    if not available:
+        return []
+
+    # Encode query
+    q_emb = model.encode([query], normalize_embeddings=True)[0]
+
+    # Aggregate similarity scores (average across fields)
+    scores = None
+    for f in available:
+        field_emb = embs[f]
+        # Use dot product because embeddings are normalized (cosine)
+        s = field_emb.dot(q_emb) if field_emb is not None else np.zeros(len(references))
+        if scores is None:
+            scores = s
+        else:
+            scores = scores + s
+    scores = scores / len(available)
+
+    # Collect and filter by year
+    scored = []
+    for i, r in enumerate(references):
+        if year_min is not None and r.get("year") < year_min:
+            continue
+        if year_max is not None and r.get("year") > year_max:
+            continue
+        scored.append((scores[i], r))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Dynamic threshold: keep only results with score greater than the
+    # average score among the (year-filtered) candidates and return up to 10 items
+    if not scored:
+        return []
+    scores_list = [s for s, _ in scored]
+    avg_score = float(np.mean(scores_list))
+    filtered = [(s, r) for s, r in scored if s > avg_score*1.1]
+    return [r for s, r in filtered[:top_k]]
 
 DATA_PATH = "example-bib.json"
 
@@ -82,20 +159,47 @@ with mid_col:
     st.header("Search")
     # When search inputs change, clear current selection (clicking elsewhere should remove focus)
     query = st.text_input("Search query", key="search_query", on_change=clear_selection)
-    fields = st.multiselect(
-        "Search in fields",
-        options=["title", "abstract", "authors", "journal", "keywords", "year"],
-        default=["title", "abstract"],
-        key="search_fields",
-        on_change=clear_selection,
-    )
+
+    ai_semantic = st.checkbox("AI Semantic Search", key="ai_semantic", on_change=clear_selection)
+
+    if ai_semantic:
+        # For semantic search limit fields to title/journal/abstract/keywords
+        fields = st.multiselect(
+            "Search in fields (AI)",
+            options=["title", "journal", "abstract", "keywords"],
+            default=["title", "abstract"],
+            key="search_fields_ai",
+            on_change=clear_selection,
+        )
+        if not any([field for field in fields]):
+            st.info("Select at least one field for AI Semantic Search")
+    else:
+        fields = st.multiselect(
+            "Search in fields",
+            options=["title", "abstract", "authors", "journal", "keywords", "year"],
+            default=["title", "abstract"],
+            key="search_fields",
+            on_change=clear_selection,
+        )
 
     st.write("Optional year filter")
     col_a, col_b = st.columns(2)
     year_min = col_a.number_input("Year min", min_value=1900, max_value=2100, value=1900, key="year_min", on_change=clear_selection)
     year_max = col_b.number_input("Year max", min_value=1900, max_value=2100, value=2100, key="year_max", on_change=clear_selection)
 
-    results = search_refs(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None)
+    # Choose search mode (lexical vs semantic)
+    if ai_semantic:
+        # Map UI field names to embeddings keys (they match here)
+        # Check embeddings availability first
+        embs = load_field_embeddings()
+        available = [f for f in fields if embs.get(f) is not None]
+        if not available:
+            st.warning("Embeddings not found for selected fields. Run `embed.py` to generate embeddings or uncheck AI Semantic Search.")
+            results = search_refs(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None)
+        else:
+            results = search_semantic(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None, 10)
+    else:
+        results = search_refs(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None)
 
     st.write(f"Found {len(results)} result(s)")
 
@@ -111,7 +215,7 @@ with mid_col:
             """, unsafe_allow_html=True)
         for r in results:
             st.markdown('<div class="special-btn">', unsafe_allow_html=True)
-            content = f"***{r["title"]}***\n**Journal:** {r.get('journal', '')}    **Year:** {r.get('year', '')}\n{r.get("abstract", "")}"
+            content = f'***{r["title"]}***\n**Journal:** {r.get("journal", "")}    **Year:** {r.get("year", "")}\n{r.get("abstract", "")}'
             if st.button(content, key=f"mid_{r['id']}", use_container_width=True):
                 select_ref(r["id"])
                 #st.write(f"**Journal:** {r.get('journal', '')}    **Year:** {r.get('year', '')}")
