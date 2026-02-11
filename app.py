@@ -4,7 +4,6 @@ import streamlit as st
 from typing import List, Dict, Any, Optional
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 
 # --- Cached model & embeddings loaders ---
 @st.cache_resource
