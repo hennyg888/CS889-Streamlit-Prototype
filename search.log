@@ -1,0 +1,3 @@
+[2026-02-20 21:18:52] AI semantic search | query='knowledge' | fields=['title', 'abstract'] | results=[12, 1, 16, 7, 10, 3, 8]
+[2026-02-20 21:19:11] lexical search | query='information' | fields=['title', 'abstract'] | results=[4]
+[2026-02-20 21:19:26] lexical search | query='asdffdsa' | fields=['authors'] | results=[]

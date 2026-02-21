@@ -95,6 +95,19 @@ def select_ref(ref_id: int):
     st.session_state.selected_ref = ref_id
 
 
+def log_search(query: str, fields: List[str], result_ids: List[int], ai_semantic: bool) -> None:
+    """Append a human-readable log entry for a search."""
+    from datetime import datetime
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mode = "AI semantic" if ai_semantic else "lexical"
+    entry = (
+        f"[{ts}] {mode} search | query='{query}' | fields={fields} | results={result_ids}\n"
+    )
+    with open("search.log", "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
 def search_refs(references: List[Dict[str, Any]], query: str, fields: List[str], year_min: int | None, year_max: int | None) -> List[Dict[str, Any]]:
     if not query and year_min is None and year_max is None:
         return references
@@ -157,7 +170,7 @@ with left_col:
 with mid_col:
     st.header("Search")
     # When search inputs change, clear current selection (clicking elsewhere should remove focus)
-    query = st.text_input("Search query", key="search_query", on_change=clear_selection)
+    query = st.chat_input("Search query")
 
     ai_semantic = st.checkbox("AI Semantic Search", key="ai_semantic", on_change=clear_selection)
 
@@ -187,18 +200,28 @@ with mid_col:
     year_max = col_b.number_input("Year max", min_value=1900, max_value=2100, value=2100, key="year_max", on_change=clear_selection)
 
     # Choose search mode (lexical vs semantic)
-    if ai_semantic:
-        # Map UI field names to embeddings keys (they match here)
-        # Check embeddings availability first
-        embs = load_field_embeddings()
-        available = [f for f in fields if embs.get(f) is not None]
-        if not available:
-            st.warning("Embeddings not found for selected fields. Run `embed.py` to generate embeddings or uncheck AI Semantic Search.")
-            results = search_refs(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None)
+    results = []
+    if query is not None:
+        if ai_semantic:
+            # Map UI field names to embeddings keys (they match here)
+            # Check embeddings availability first
+            embs = load_field_embeddings()
+            available = [f for f in fields if embs.get(f) is not None]
+            if not available:
+                st.warning("Embeddings not found for selected fields. Run `embed.py` to generate embeddings or uncheck AI Semantic Search.")
+                results = search_refs(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None)
+            else:
+                results = search_semantic(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None, 10)
         else:
-            results = search_semantic(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None, 10)
-    else:
-        results = search_refs(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None)
+            results = search_refs(references, query.strip(), fields, year_min if year_min != 1900 else None, year_max if year_max != 2100 else None)
+
+        # log the search event
+        try:
+            result_ids = [r["id"] for r in results] if results else []
+            log_search(query.strip(), fields, result_ids, ai_semantic)
+        except Exception as e:
+            # If logging fails, just ignore to not break app
+            st.error(f"Logging error: {e}")
 
     st.write(f"Found {len(results)} result(s)")
 
